@@ -16,7 +16,7 @@ library(knitr)
 library(parallel)
 
 
-plot_locations <- read.csv("/Users/jeffkropelnicki/Desktop/Winfield files/Weather data and code/scratch.csv") %>% mutate(loc_index=row_number()) 
+plot_locations <- read.csv("") %>% mutate(loc_index=row_number()) 
   
 file <- "ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv"
 
@@ -229,14 +229,6 @@ Station_data_2017 <- Station_data_2017 %>%
             Avg_Relative_Humidity = round(mean(Relative_Humidity, na.rm = TRUE))) %>%
   unite(ID, c(USAFID, WBAN), sep = "-", remove = FALSE)
 
-
-#write.csv(station_data, "data/station_data.csv")
-
-
-#Make a list that shows how many day of data we downloaded for each location. 
-#print(Station_data_2017 %>% group_by(ID) %>% summarise(count = n()))
-#print(Station_data2017)
-
 ```
           
     
@@ -288,8 +280,6 @@ nearest_weather_stations <- rbind(nearest_weather_stations_2016, nearest_weather
 
 nearest_weather_stations <- nearest_weather_stations %>% select(ID, USAF, WBAN = WBAN.x, Station_name = STATION.NAME, answer_plot = Location, ans_plot_lat = LATITUDE, ans_plot_long = LONGITUDE, ICAO, station_state = STATE, station_lat = LAT, station_long = LON, ELEV = ELEV.M., distance, nearness, Quadrant, DATE, Max_temp, Min_temp, Avg_temp, Max_wind_spd, Min_wind_spd, Avg_wind, Max_dewpoint, Min_dewpoint, Avg_dewpoint, Max_Relative_Humidity, Min_Relative_Humidity, Avg_Relative_Humidity) %>% group_by(Station_name)
 
-
-write.csv(nearest_weather_stations, "outputs/NOAA_temp_data_2016-2017.csv")
 ```
 
 
@@ -315,15 +305,6 @@ t6 <- nearest_weather_stations %>%
   group_by(Answer_Plot) %>% 
   summarise(`Number of days over all stations`  = n()) 
 write.csv(t6, "outputs/Num_days_per_answer_plot_with_all_stations.csv")
-
-
-
-#stations <- unite(stations, ID, c(USAF, WBAN), sep = "-", remove = FALSE)
-
-
-
-
-nearest_weather_stations <- nearest_weather_stations %>% filter(!is.na(Answer_Plot))
 
 ```
 
