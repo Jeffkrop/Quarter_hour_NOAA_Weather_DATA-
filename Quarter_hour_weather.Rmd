@@ -1,0 +1,329 @@
+---
+title: "NOAA Weather"
+output: html_notebook
+---
+
+**wget must be installed on your computer to run this code.**
+
+Reading in Answer Plot and NOAA weather data from ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv      
+The data for the Answer Plots has name, location, latitude and longitude.    
+The data for the NOAA weather stations come from the history.csv this .csv holds the names and locations of all NOAA weather stations that have ever been running.    
+```{r, warning=FALSE, message=FALSE}
+library(sp)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(parallel)
+
+
+plot_locations <- read.csv("/Users/jeffkropelnicki/Desktop/Winfield files/Weather data and code/scratch.csv") %>% mutate(loc_index=row_number()) 
+  
+file <- "ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv"
+
+repeat{
+  try(download.file(file, "isd-history.csv", quiet = TRUE))
+  if (file.info("isd-history.csv")$size > 0) {
+    break
+    }
+  }
+
+#Create data frame of weather stations that are in the United States and were in operation in the year 2016
+stations <- read.csv("isd-history.csv") %>%
+  filter(CTRY=="US") %>%
+  filter(BEGIN <= 20160101 & END >=20161231) %>%
+  mutate(st_index=row_number()) %>%
+  arrange(STATION.NAME)
+
+# Remove rows below that do not return good data. MUST CHECK ROW NUMBERS EVERYTIME!!!
+
+stations <- stations[-c(2416),] # remove PUTNAM CO only 207 days
+stations <- stations[-c(1775), ] # remove MARION MUNICIPAL AP Only 83 days
+stations <- stations[-c(1765),] # remove MARCUS HOOK only 146 days
+stations <- stations[-c(1708),] # remove LOUISIANA REGIONAL AIRPORT only 209 days
+stations <- stations[-c(1463), ] # remove JIMMY CARTER REGIONAL AIRPORT only 44 days
+stations <- stations[-c(931), ] # remove ELK CITY MUNI only 43 days
+stations <- stations[-c(262), ] # remove BLACKWELL TONKAWA MUNI only 8days
+stations <- stations[-c(38), ] # remove AIKEN MUNICIPAL AIRPORT only 6 days
+
+
+stations <- stations %>% arrange(st_index) 
+t1 <- stations %>% filter(STATION.NAME == "PUTNAM CO" )
+
+# Because the station data is only available for year we can remove the month and day from the begin and end fields. 
+stations$BEGIN <- as.numeric(substr(stations$BEGIN, 1, 4))
+stations$END <- as.numeric(substr(stations$END, 1, 4))
+
+
+length_st <- count(stations) %>%
+  as.numeric()
+length_loc <- count(plot_locations) %>%
+  as.numeric()
+
+loc_index <- rep(1:length_loc, length_st)
+st_index <- rep(1:length_st, each=length_loc)
+```   
+      
+         
+Below I use Haversine formula https://en.wikipedia.org/wiki/Haversine_formula to find the distance each weather station is from an Answer Plot. With this measurement it picks the 3 weather stations that are nearest. A new column is added that shows the distance in miles a station is from the Answer Plots along with a rank for 1 being closest and 3 being furthest.    
+**Some stations are close to more then one Answer Plot meaning they may not be one one to one.** 
+```{r}
+#Convert latitude and Longitude from degrees to radians for answer plot locations and weather stations
+plot_locations <- plot_locations %>% 
+  mutate(lat1 = (LATITUDE*pi)/180) %>%  
+  mutate(lon1 = (LONGITUDE*pi)/180)
+
+stations <- stations %>% 
+  mutate(lat2 = (LAT * pi)/180) %>%
+  mutate(lon2 = (LON * pi)/180)
+  
+
+#New data frame with both Answer Plots and weather stations data remove all but the 3 nearest weather stations to each Answer Plot and return nearness 1-3, distance in miles, lat and long of both Answer Plots and weather stations. 
+distances <- cbind(st_index, loc_index) %>%
+  as.data.frame() %>%
+  left_join(plot_locations) %>%
+  left_join(stations) %>%
+  mutate(a = sin((lat2-lat1)/2)^2 + cos(lat1) * cos(lat2) * sin((lon2 - lon1)/2)^2) %>%
+  mutate(b = 2 * asin(sqrt(a))) %>%
+  mutate(distance = round((6371 * b)*0.6, digits = 2)) %>%
+  arrange(Location, distance) %>%
+  group_by(Location) %>%
+  arrange(Location, distance) %>%
+  mutate(nearness = row_number()) %>%
+  filter(nearness <= 20) %>%
+  select(USAF, WBAN, STATION.NAME, Location, LATITUDE, LONGITUDE, ICAO, STATE, LAT, LON, ELEV.M., distance, nearness, BEGIN, END) %>% 
+  ungroup %>%
+  as.data.frame()
+
+#distances <- distances %>%
+#  unite("ID", c(USAF, WBAN), sep = "-", remove = FALSE) %>%
+#   select(ID, USAF, WBAN, STATION.NAME, Location, LATITUDE, LONGITUDE, ICAO, STATE, LAT, LON, ELEV.M., distance, nearness, BEGIN, END)
+
+distances = within(distances, {
+    Quadrant_1 = ifelse(LATITUDE < LAT & LONGITUDE < LON, 1, 0)
+    Quadrant_2 = ifelse(LATITUDE < LAT & LONGITUDE > LON, 2, 0)
+    Quadrant_3 = ifelse(LATITUDE > LAT & LONGITUDE > LON, 3, 0)
+    Quadrant_4 = ifelse(LATITUDE > LAT & LONGITUDE < LON, 4, 0)
+ })
+
+distances <- distances %>% mutate(Quadrant = NA) 
+distances$Quadrant <- with(distances, Quadrant_1 + Quadrant_2 + Quadrant_3 + Quadrant_4)
+
+distances <- distances %>% 
+    distinct(Location, Quadrant,.keep_all=T) %>%
+    group_by(Location) %>%
+    top_n(-3,nearness) %>% 
+    ungroup %>%
+    as.data.frame()
+
+#write.csv(distances, file = "/Users/jeffkropelnicki/Desktop/weather_stations.csv")
+
+#New table showing how many Answer Plots go with each weather station. 
+list_unique_stations <- distances %>% group_by(STATION.NAME) %>% summarise(count = n())
+hist(list_unique_stations$count)
+print(list_unique_stations)
+
+```   
+    
+
+ 
+Now that we have locations for the 3 weather stations that are nearest to the Answer Plots and each in a different quadrant we can download the data from the NOAA FTP site. Doing this on my Mac book pro for two years and 171 locations took 9 minutes to download. 
+```{r}
+outputs <- as.data.frame(matrix(NA, dim(distances)[1], 2))
+names(outputs) <- c("FILE", "STATUS")
+
+system.time(for (y in 2016:2017) {
+    y.mi.list <- distances[distances$BEGIN <= y & distances$END >= y, ]
+for (s in 1:dim(y.mi.list)[1]) {
+   outputs[s, 1] <- paste(sprintf("%06d", y.mi.list[s,1]), "-", sprintf("%05d", y.mi.list[s,2]), "-", y, ".gz", sep = "")
+   wget <- paste("wget -P data/NOAA_temp_data ftp://ftp.ncdc.noaa.gov/pub/data/noaa/", y, "/", outputs[s, 1], sep = "")
+   outputs[s, 2] <- try(system(wget, intern = FALSE, ignore.stderr = TRUE))
+   }
+})
+
+print(outputs %>% group_by(STATUS) %>% summarise(count = n()))
+```
+   
+   
+      
+Unzipping the station data and creating a data frame that has weather data for every 15 minutes of everyday for every location in our distances data set. For 122 locations the NOAA returned over 3 million readings. On my Mac Book Pro this takes 11 minute.
+```{r}
+#unzips the file downloaded from NOAA
+system("gunzip -r data/2017", intern = FALSE, ignore.stderr = TRUE)
+
+NOAA_files2017 <- list.files("data/NOAA_temp_data")
+column.widths <- c(4, 6, 5, 4, 2, 2, 2, 2, 1, 6, 7, 5, 5, 5, 4, 3, 1, 1, 4, 1, 5, 1, 1, 1, 6,
+  1, 1, 1, 5, 1, 5, 1, 5, 1)
+
+#The code below is run in PARALLEL meaning it runs on more then one core. My Mac has 8 cores so I am running it on 7 leaving one for the rest of the computer. 
+no_cores <- detectCores()-1
+print(no_cores)
+
+cl <- makeCluster(no_cores, type="FORK")
+clusterExport(cl, "column.widths")
+
+system.time(Station_data <- do.call("rbind", 
+          parLapply(cl, NOAA_files2017,
+                 function(x) 
+                 read.fwf(paste("data/NOAA_temp_data/", x, sep=''),  column.widths,
+                 stringsAsFactors = FALSE))))
+
+#Always stop the cluster to free up the cores on the machine. 
+stopCluster(cl)
+```
+   
+      
+With all the files downloaded and a new data frame created some changes need to be made so that it is readable. 
+```{r}
+# Only keep with data that is needed and name the calumns. 
+
+Station_data <- Station_data[, c(2:8, 10:11, 13, 16, 19, 29, 31, 33)]
+names(Station_data) <- c("USAFID", "WBAN", "YR", "M", "D", "HR", "MIN", "LAT", "LONG", "ELEV",
+                    "WIND.DIR", "WIND.SPD", "TEMP", "DEW.POINT", "ATM.PRES")
+
+Station_data$LAT <- Station_data$LAT/1000
+Station_data$LONG <- Station_data$LONG/1000
+Station_data$WIND.SPD <- Station_data$WIND.SPD/10
+Station_data$TEMP <- Station_data$TEMP/10
+Station_data$DEW.POINT <- Station_data$DEW.POINT/10
+
+# I want to remove that 999 and put NA in its place. 
+Station_data$WIND.DIR[Station_data$WIND.DIR == 999] <- NA
+Station_data$TEMP[Station_data$TEMP == 999.9] <- NA
+Station_data$WIND.SPD[Station_data$WIND.SPD == 999.9] <- NA
+Station_data$DEW.POINT[Station_data$DEW.POINT == 999.9] <- NA
+Station_data$ATM.PRES[Station_data$ATM.PRES == 99999] <- NA
+
+# Calculate Relative Humidity before converting temp and dewpoint to Fahrenheit  
+Station_data <- Station_data %>% 
+  mutate(Relative_Humidity = round(100*(exp((17.625*DEW.POINT)/(243.04+DEW.POINT))/exp((17.625*TEMP)/(243.04+TEMP)))))
+
+```   
+   
+Need to pull out only the 2017 for the months I need.       
+```{r}
+# Time of year, convert temp and dewpoint to Fahrenheit and windspeed from meters per second to miles per hour. 
+Station_data_2017 <- Station_data %>% 
+  filter(YR == 2017) %>%
+  filter(M <= 06) %>% 
+  mutate(temp_fahr = round(TEMP *1.8 + 32)) %>% 
+  mutate(wind_spd_mph = round(WIND.SPD * 2.2369, digits = 3)) %>% 
+  mutate(dewpoint = round(DEW.POINT*1.8 + 32)) 
+
+# Merge the Y, M, D columns in to one for Date. 
+Station_data_2017$DATE <- as.Date(paste(Station_data_2017$M, Station_data_2017$D, Station_data_2017$YR, sep = "-"), format = "%m-%d-%Y")
+
+# Group the data by USAFID, WBAN, DATE this after the change above to add the column DATE this now makes it day not every 15 minutes. Find the mean, max and min to make new columns in a new data frame.
+Station_data_2017 <- Station_data_2017 %>% 
+  group_by(USAFID, WBAN, DATE) %>% 
+  summarise(Max_temp = max(temp_fahr, na.rm = TRUE),
+            Min_temp = min(temp_fahr, na.rm = TRUE), 
+            Avg_temp = round(mean(temp_fahr, na.rm = TRUE)), 
+            Max_wind_spd = max(wind_spd_mph, na.rm = TRUE), 
+            Min_wind_spd = min(wind_spd_mph, na.rm = TRUE), 
+            Avg_wind = round(mean(wind_spd_mph, na.rm = TRUE)), 
+            Max_dewpoint = max(dewpoint, na.rm = TRUE), 
+            Min_dewpoint = min(dewpoint, na.rm = TRUE), 
+            Avg_dewpoint = round(mean(dewpoint, na.rm = TRUE)), 
+            Max_Relative_Humidity = max(Relative_Humidity, na.rm = TRUE), 
+            Min_Relative_Humidity = min(Relative_Humidity, na.rm = TRUE), 
+            Avg_Relative_Humidity = round(mean(Relative_Humidity, na.rm = TRUE))) %>%
+  unite(ID, c(USAFID, WBAN), sep = "-", remove = FALSE)
+
+
+#write.csv(station_data, "data/station_data.csv")
+
+
+#Make a list that shows how many day of data we downloaded for each location. 
+#print(Station_data_2017 %>% group_by(ID) %>% summarise(count = n()))
+#print(Station_data2017)
+
+```
+          
+    
+Need to pull out only the 2016 for the months I need.             
+```{r}
+Station_data_2016 <- Station_data %>% 
+  filter(YR == 2016) %>%
+  filter(M >= 08) %>% 
+  mutate(temp_fahr = round(TEMP *1.8 + 32)) %>% 
+  mutate(wind_spd_mph = round(WIND.SPD * 2.2369, digits = 3)) %>% 
+  mutate(dewpoint = round(DEW.POINT*1.8 + 32)) 
+
+#Merge the Y, M, D columns in to one for Date. 
+Station_data_2016$DATE <- as.Date(paste(Station_data_2016$M, Station_data_2016$D, Station_data_2016$YR, sep = "-"), format = "%m-%d-%Y")
+
+# Group the data by USAFID, WBAN, DATE this after the change above to add the column DATE this now makes it day not every 15 minutes. Find the mean, max and min to make new columns in a new data frame.
+Station_data_2016 <- Station_data_2016 %>% 
+  group_by(USAFID, WBAN, DATE) %>% 
+  summarise(Max_temp = max(temp_fahr,  na.rm = TRUE),
+            Min_temp = min(temp_fahr,  na.rm = TRUE), 
+            Avg_temp = round(mean(temp_fahr,  na.rm = TRUE)), 
+            Max_wind_spd = max(wind_spd_mph,  na.rm = TRUE), 
+            Min_wind_spd = min(wind_spd_mph,  na.rm = TRUE), 
+            Avg_wind = round(mean(wind_spd_mph,  na.rm = TRUE)), 
+            Max_dewpoint = max(dewpoint,  na.rm = TRUE), 
+            Min_dewpoint = min(dewpoint,  na.rm = TRUE), 
+            Avg_dewpoint = round(mean(dewpoint,  na.rm = TRUE)), 
+            Max_Relative_Humidity = max(Relative_Humidity,  na.rm = TRUE), 
+            Min_Relative_Humidity = min(Relative_Humidity,  na.rm = TRUE), 
+            Avg_Relative_Humidity = round(mean(Relative_Humidity,  na.rm = TRUE))) %>%
+  unite(ID, c(USAFID, WBAN), sep = "-", remove = FALSE)
+
+
+```   
+   
+   
+
+Join the Station data with the distance data to make nearest weather stations. 
+```{r} 
+
+distances <- unite(distances, "ID", c(USAF, WBAN), sep = "-", remove = FALSE)
+
+#join distances with station data. 
+nearest_weather_stations_2016 <- full_join(distances, Station_data_2016, by = "ID") 
+nearest_weather_stations_2017 <- full_join(distances, Station_data_2017, by = "ID")
+
+nearest_weather_stations <- rbind(nearest_weather_stations_2016, nearest_weather_stations_2017)
+
+
+nearest_weather_stations <- nearest_weather_stations %>% select(ID, USAF, WBAN = WBAN.x, Station_name = STATION.NAME, answer_plot = Location, ans_plot_lat = LATITUDE, ans_plot_long = LONGITUDE, ICAO, station_state = STATE, station_lat = LAT, station_long = LON, ELEV = ELEV.M., distance, nearness, Quadrant, DATE, Max_temp, Min_temp, Avg_temp, Max_wind_spd, Min_wind_spd, Avg_wind, Max_dewpoint, Min_dewpoint, Avg_dewpoint, Max_Relative_Humidity, Min_Relative_Humidity, Avg_Relative_Humidity) %>% group_by(Station_name)
+
+
+write.csv(nearest_weather_stations, "outputs/NOAA_temp_data_2016-2017.csv")
+```
+
+
+Below is code to do analysis for the nearest weather station data frame. 
+```{r}
+
+sum(is.na(nearest_weather_stations$Avg_temp))/54730
+sum(is.na(nearest_weather_stations$Max_temp))/54730
+sum(is.na(nearest_weather_stations$Min_temp))/54730
+sum(is.na(nearest_weather_stations$Avg_wind))/54730
+
+t0 <- nearest_weather_stations %>% group_by(Station_name) %>% summarise(`Days with weather data` = n()) %>% mutate(`Percent of days with weather data` = round((`Days with weather data`/334)*100, digits = 2)) %>% arrange(`Days with weather data`)
+head(t0, n = 35)
+
+t1 <- nearest_weather_stations %>% summarise(count = n())
+t2 <- nearest_weather_stations %>% filter(is.na(Station_name))
+t3 <- nearest_weather_stations %>% 
+  group_by(Answer_Plot, Station_name, distance) %>% 
+  summarise(`Days with data` = n())
+write.csv(t3, "outputs/stations_days_per_answer_plot.csv")
+t4 <- nearest_weather_stations %>% filter(Station_name == "MARION MUNICIPAL AP")
+t6 <- nearest_weather_stations %>% 
+  group_by(Answer_Plot) %>% 
+  summarise(`Number of days over all stations`  = n()) 
+write.csv(t6, "outputs/Num_days_per_answer_plot_with_all_stations.csv")
+
+
+
+#stations <- unite(stations, ID, c(USAF, WBAN), sep = "-", remove = FALSE)
+
+
+
+
+nearest_weather_stations <- nearest_weather_stations %>% filter(!is.na(Answer_Plot))
+
+```
+
